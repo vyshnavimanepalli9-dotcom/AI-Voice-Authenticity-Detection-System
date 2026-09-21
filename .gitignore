@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+ENV/
+.env
+
+# Uploads & temporary files
+uploads/*
+!uploads/.gitkeep
+
+# Models & binaries
+models/*.joblib
+models/*.pkl
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

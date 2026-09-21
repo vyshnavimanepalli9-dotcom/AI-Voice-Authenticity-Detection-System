@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Voice Authenticity Detection Agent</title>
+    <!-- Font Awesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Top Navigation / Header -->
+        <header class="app-header">
+            <div class="brand">
+                <div class="brand-icon">
+                    <i class="fa-solid fa-waveform-lines"></i>
+                </div>
+                <div>
+                    <h1>VoiceAuthentic<span class="highlight">.AI</span></h1>
+                    <p class="tagline">Synthetic Voice & Audio Deepfake Detection System</p>
+                </div>
+            </div>
+            
+            <div class="header-controls">
+                <div id="mode-badge" class="badge badge-demo">
+                    <span class="status-dot"></span>
+                    <span id="mode-text">Checking System Status...</span>
+                </div>
+                <button id="theme-toggle" class="btn-icon" title="Toggle Light/Dark Theme">
+                    <i class="fa-solid fa-sun"></i>
+                </button>
+            </div>
+        </header>
+
+        <!-- Main Workspace -->
+        <main class="main-content">
+            <!-- Left Panel: Input & Control -->
+            <section class="panel input-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-microphone-lines"></i> Audio Source</h2>
+                    <p>Upload a voice recording or capture live audio using your microphone.</p>
+                </div>
+
+                <!-- Input Tabs -->
+                <div class="tab-group">
+                    <button class="tab-btn active" data-tab="upload-tab">
+                        <i class="fa-solid fa-cloud-arrow-up"></i> Upload Audio
+                    </button>
+                    <button class="tab-btn" data-tab="record-tab">
+                        <i class="fa-solid fa-circle-dot"></i> Record Voice
+                    </button>
+                </div>
+
+                <!-- Tab 1: File Upload -->
+                <div id="upload-tab" class="tab-content active">
+                    <div id="drop-zone" class="drop-zone">
+                        <i class="fa-solid fa-file-audio drop-icon"></i>
+                        <h3>Drag & Drop audio file here</h3>
+                        <p class="drop-hint">Supports WAV, MP3, OGG, FLAC, M4A, WEBM (Max 15MB)</p>
+                        <label for="audio-file-input" class="btn btn-secondary">
+                            <i class="fa-solid fa-folder-open"></i> Browse Files
+                        </label>
+                        <input type="file" id="audio-file-input" accept="audio/*" hidden>
+                    </div>
+                </div>
+
+                <!-- Tab 2: Microphone Recorder -->
+                <div id="record-tab" class="tab-content">
+                    <div class="recorder-card">
+                        <div class="recorder-status">
+                            <div id="record-indicator" class="record-pulse"></div>
+                            <span id="record-timer">00:00</span>
+                        </div>
+                        <p id="record-status-text">Click "Start Recording" to capture voice audio</p>
+                        <div class="recorder-controls">
+                            <button id="start-record-btn" class="btn btn-danger">
+                                <i class="fa-solid fa-microphone"></i> Start Recording
+                            </button>
+                            <button id="stop-record-btn" class="btn btn-secondary" disabled>
+                                <i class="fa-solid fa-square"></i> Stop
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Audio Waveform & File Details Card -->
+                <div id="audio-preview-card" class="preview-card hidden">
+                    <div class="preview-header">
+                        <span id="file-name-display"><i class="fa-solid fa-file-code"></i> sample_voice.wav</span>
+                        <button id="clear-audio-btn" class="btn-text"><i class="fa-solid fa-xmark"></i> Clear</button>
+                    </div>
+
+                    <!-- Audio Player -->
+                    <audio id="audio-player" controls></audio>
+
+                    <!-- Waveform Visualizer -->
+                    <div class="waveform-container">
+                        <span class="waveform-title">Audio Signal Amplitude Waveform</span>
+                        <canvas id="waveform-canvas" height="80"></canvas>
+                    </div>
+
+                    <!-- Action Button -->
+                    <button id="analyze-btn" class="btn btn-primary btn-block">
+                        <i class="fa-solid fa-brain"></i> Analyze Voice Authenticity
+                    </button>
+                </div>
+
+                <!-- Loading Overlay -->
+                <div id="loading-overlay" class="loading-overlay hidden">
+                    <div class="spinner-container">
+                        <div class="pulse-ring"></div>
+                        <i class="fa-solid fa-microchip spinner-icon"></i>
+                    </div>
+                    <h3>Extracting Acoustic Features...</h3>
+                    <p>Analyzing MFCCs, Spectral Centroid, and Pitch Contours</p>
+                    <div class="progress-bar">
+                        <div id="progress-fill" class="progress-fill"></div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Results & Dashboard -->
+            <section class="panel results-panel">
+                <div class="panel-header">
+                    <h2><i class="fa-solid fa-chart-network"></i> Authenticity Results Dashboard</h2>
+                    <p>AI probabilistic detection & acoustic signal metrics.</p>
+                </div>
+
+                <!-- Empty State -->
+                <div id="empty-state" class="empty-state">
+                    <i class="fa-solid fa-shield-halved empty-icon"></i>
+                    <h3>No Audio Analyzed Yet</h3>
+                    <p>Upload or record an audio sample and click "Analyze Voice Authenticity" to view classification results and acoustic breakdown.</p>
+                </div>
+
+                <!-- Results Output Card (Initially Hidden) -->
+                <div id="results-card" class="results-card hidden">
+                    <!-- Main Verdict Banner -->
+                    <div id="verdict-banner" class="verdict-banner verdict-human">
+                        <div class="verdict-icon">
+                            <i id="verdict-icon-i" class="fa-solid fa-user-check"></i>
+                        </div>
+                        <div class="verdict-text">
+                            <span class="verdict-label">DETECTION PREDICTION</span>
+                            <h2 id="prediction-title">REAL HUMAN VOICE</h2>
+                            <span id="calibrated-status-tag" class="calibrated-tag">Calibrated ML Prediction</span>
+                        </div>
+                        <div class="confidence-gauge">
+                            <div class="confidence-value" id="confidence-val">87%</div>
+                            <div class="confidence-label">CONFIDENCE</div>
+                        </div>
+                    </div>
+
+                    <!-- Demo Mode Alert Banner (if applicable) -->
+                    <div id="demo-notice-box" class="alert-box alert-warning hidden">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <div>
+                            <strong>DEMO MODE NOTICE:</strong>
+                            <p id="demo-notice-text">Prediction generated using signal heuristic analysis because no trained .joblib binary was found in models/.</p>
+                        </div>
+                    </div>
+
+                    <!-- Signal Overview Metrics Grid -->
+                    <div class="metrics-grid">
+                        <div class="metric-card">
+                            <i class="fa-solid fa-clock"></i>
+                            <div class="metric-info">
+                                <span class="metric-label">Duration</span>
+                                <span class="metric-value" id="m-duration">0.0 s</span>
+                            </div>
+                        </div>
+                        <div class="metric-card">
+                            <i class="fa-solid fa-sliders"></i>
+                            <div class="metric-info">
+                                <span class="metric-label">Sampling Rate</span>
+                                <span class="metric-value" id="m-sr">22050 Hz</span>
+                            </div>
+                        </div>
+                        <div class="metric-card">
+                            <i class="fa-solid fa-stopwatch"></i>
+                            <div class="metric-info">
+                                <span class="metric-label">Processing Time</span>
+                                <span class="metric-value" id="m-time">0 ms</span>
+                            </div>
+                        </div>
+                        <div class="metric-card">
+                            <i class="fa-solid fa-robot"></i>
+                            <div class="metric-info">
+                                <span class="metric-label">Classifier Model</span>
+                                <span class="metric-value" id="m-model">RandomForest</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Extracted Audio Features Summary -->
+                    <div class="section-box">
+                        <h3><i class="fa-solid fa-chart-simple"></i> Extracted Feature Summary</h3>
+                        <div class="feature-grid">
+                            <div class="feature-item">
+                                <span class="f-label">Pitch (f0 Mean)</span>
+                                <span class="f-val" id="f-pitch">-- Hz</span>
+                            </div>
+                            <div class="feature-item">
+                                <span class="f-label">Pitch Variation Index</span>
+                                <span class="f-val" id="f-pitch-var">--</span>
+                            </div>
+                            <div class="feature-item">
+                                <span class="f-label">Spectral Centroid</span>
+                                <span class="f-val" id="f-centroid">-- Hz</span>
+                            </div>
+                            <div class="feature-item">
+                                <span class="f-label">Spectral Rolloff</span>
+                                <span class="f-val" id="f-rolloff">-- Hz</span>
+                            </div>
+                            <div class="feature-item">
+                                <span class="f-label">Zero Crossing Rate</span>
+                                <span class="f-val" id="f-zcr">--</span>
+                            </div>
+                            <div class="feature-item">
+                                <span class="f-label">MFCC Variance</span>
+                                <span class="f-val" id="f-mfcc-var">--</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Explainable AI (XAI) Breakdown -->
+                    <div class="section-box">
+                        <h3><i class="fa-solid fa-lightbulb"></i> Explainable AI (XAI) Feature Impact</h3>
+                        <p id="xai-summary-text" class="xai-summary">Model reasoning summary...</p>
+                        <div id="xai-factors-container" class="xai-factors">
+                            <!-- Populated dynamically -->
+                        </div>
+                    </div>
+
+                    <!-- Standard Disclaimer -->
+                    <div class="disclaimer-box">
+                        <i class="fa-solid fa-circle-info"></i>
+                        <p><strong>Disclaimer:</strong> AI-generated voice detection is probabilistic and may produce false results depending on compression or noise. Results should not be treated as absolute legal proof.</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="app-footer">
+            <p>AI Voice Authenticity Detection Agent &bull; Powered by Librosa, Scikit-learn & Flask</p>
+        </footer>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
