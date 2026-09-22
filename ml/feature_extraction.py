@@ -1,24 +1,24 @@
 import os
+import logging
+import math
 
-# Prevent Numba compilation problems inside librosa.core.audio.
+# =========================================================
+# IMPORTANT: Disable Numba JIT BEFORE importing librosa
+# =========================================================
+#
+# Render was previously triggering Numba/LLVM compilation
+# during audio analysis, which caused:
+#
+#   WORKER TIMEOUT
+#   SIGKILL
+#   HTTP 500
+#
+# We do not use librosa's JIT-dependent ZCR implementation.
+#
+# =========================================================
+
 os.environ["NUMBA_DISABLE_JIT"] = "1"
 os.environ["NUMBA_NUM_THREADS"] = "1"
-
-import numba
-
-# librosa.feature imports zero-crossing helpers that use Numba
-# decorators during module initialization. Our project already
-# calculates ZCR with a NumPy implementation, so these decorators
-# do not need to compile at runtime.
-def _no_compile_decorator(*args, **kwargs):
-    def decorator(func):
-        return func
-    return decorator
-
-numba.guvectorize = _no_compile_decorator
-numba.stencil = _no_compile_decorator
-
-import logging
 
 import librosa
 import numpy as np
@@ -26,27 +26,95 @@ import soundfile as sf
 
 from scipy.signal import resample_poly
 
-logger = logging.getLogger(__name__)# =========================================================
+
+logger = logging.getLogger(__name__)
+
+
+# =========================================================
+# Configuration
+# =========================================================
+
+TARGET_SAMPLE_RATE = 22050
+
+# Maximum audio duration processed by the feature extractor.
+# This prevents extremely long uploads from consuming too
+# much memory/time on Render.
+MAX_AUDIO_DURATION_SECONDS = 60.0
+
+# Standard feature extraction parameters
+FRAME_LENGTH = 2048
+HOP_LENGTH = 512
+
+
+# =========================================================
+# Utility: Safe Audio Normalization
+# =========================================================
+
+def _normalize_audio(y):
+    """
+    Clean and normalize an audio signal.
+
+    Returns:
+        numpy.ndarray
+    """
+
+    y = np.asarray(
+        y,
+        dtype=np.float32
+    )
+
+    if y.size == 0:
+        return y
+
+    # Remove NaN / infinity
+    y = np.nan_to_num(
+        y,
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0
+    )
+
+    # Normalize only if necessary
+    max_amplitude = float(
+        np.max(
+            np.abs(y)
+        )
+    )
+
+    if max_amplitude > 1.0:
+
+        y = (
+            y /
+            max_amplitude
+        ).astype(
+            np.float32
+        )
+
+    return y
+
+
+# =========================================================
 # Utility: Frame-based Zero Crossing Rate
 # =========================================================
 
 def _calculate_zero_crossing_rate(
     y,
-    frame_length=2048,
-    hop_length=512
+    frame_length=FRAME_LENGTH,
+    hop_length=HOP_LENGTH
 ):
     """
     NumPy implementation of frame-based Zero Crossing Rate.
 
-    This intentionally avoids:
-        librosa.feature.zero_crossing_rate()
+    IMPORTANT:
+        We intentionally do NOT use:
 
-    because the Render deployment was producing:
+            librosa.feature.zero_crossing_rate()
 
-        no compiled object yet for <Library '_zc_wrapper'>
+        because the deployment previously triggered
+        Numba/LLVM compilation problems.
 
     Returns:
-        zcr -> 1D numpy array
+        1D numpy array
     """
 
     y = np.asarray(
@@ -55,6 +123,7 @@ def _calculate_zero_crossing_rate(
     )
 
     if len(y) == 0:
+
         return np.array(
             [0.0],
             dtype=np.float32
@@ -76,18 +145,7 @@ def _calculate_zero_crossing_rate(
         )
 
     # -----------------------------------------------------
-    # Number of frames
-    # -----------------------------------------------------
-
-    number_of_frames = (
-        1
-        +
-        (len(y) - frame_length)
-        // hop_length
-    )
-
-    # -----------------------------------------------------
-    # Create overlapping frames
+    # Create frames
     # -----------------------------------------------------
 
     frames = np.lib.stride_tricks.sliding_window_view(
@@ -99,9 +157,12 @@ def _calculate_zero_crossing_rate(
         ::hop_length
     ]
 
-    frames = frames[
-        :number_of_frames
-    ]
+    if frames.size == 0:
+
+        return np.array(
+            [0.0],
+            dtype=np.float32
+        )
 
     # -----------------------------------------------------
     # Detect sign changes
@@ -121,15 +182,40 @@ def _calculate_zero_crossing_rate(
     # Calculate crossing ratio
     # -----------------------------------------------------
 
-    zcr = (
-        np.mean(
-            crossings,
-            axis=1
-        )
-        .astype(np.float32)
+    zcr = np.mean(
+        crossings,
+        axis=1
+    ).astype(
+        np.float32
     )
 
     return zcr
+
+
+# =========================================================
+# Utility: Safe Float
+# =========================================================
+
+def _safe_float(
+    value,
+    default=0.0
+):
+    """
+    Convert a numerical value into a safe Python float.
+    """
+
+    try:
+
+        value = float(value)
+
+        if not np.isfinite(value):
+            return float(default)
+
+        return value
+
+    except Exception:
+
+        return float(default)
 
 
 # =========================================================
@@ -143,7 +229,7 @@ def extract_features_from_audio(
     """
     Extract acoustic features from an audio signal.
 
-    Feature vector contains:
+    Feature vector contains exactly 79 features:
 
         1-20    MFCC mean
         21-40   MFCC standard deviation
@@ -165,9 +251,6 @@ def extract_features_from_audio(
         78      MFCC delta standard deviation
         79      Spectral flux
 
-    Total:
-        79 features
-
     Returns:
         {
             "feature_vector": numpy array,
@@ -177,10 +260,11 @@ def extract_features_from_audio(
     """
 
     # =====================================================
-    # 0. Validate Input
+    # 0. Validate input
     # =====================================================
 
     if y is None:
+
         raise ValueError(
             "Audio signal is None."
         )
@@ -191,48 +275,69 @@ def extract_features_from_audio(
     )
 
     if len(y) == 0:
+
         raise ValueError(
             "Audio signal is empty."
         )
 
     if sr is None or sr <= 0:
+
         raise ValueError(
             "Invalid sample rate."
         )
 
-    # Remove NaN / infinity
-    y = np.nan_to_num(
-        y,
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0
+    sr = int(sr)
+
+    # =====================================================
+    # Clean audio
+    # =====================================================
+
+    y = _normalize_audio(
+        y
     )
 
-    # Normalize extremely large values
-    max_amplitude = np.max(
-        np.abs(y)
-    )
+    if len(y) == 0:
 
-    if max_amplitude > 1.0:
-
-        y = (
-            y /
-            max_amplitude
+        raise ValueError(
+            "Audio signal contains no usable samples."
         )
+
+    # =====================================================
+    # Limit extremely long audio
+    # =====================================================
+
+    max_samples = int(
+        MAX_AUDIO_DURATION_SECONDS *
+        sr
+    )
+
+    if len(y) > max_samples:
+
+        logger.warning(
+            "Audio duration exceeds %.1f seconds. "
+            "Only the first %.1f seconds will be analyzed.",
+            MAX_AUDIO_DURATION_SECONDS,
+            MAX_AUDIO_DURATION_SECONDS
+        )
+
+        y = y[
+            :max_samples
+        ]
 
     # =====================================================
     # 1. Signal Metrics
     # =====================================================
 
-    duration = float(
-        len(y) / sr
+    duration = (
+        len(y) /
+        float(sr)
     )
 
     # -----------------------------------------------------
     # RMS Energy
     # -----------------------------------------------------
 
-    rms = float(
+    rms = _safe_float(
         np.sqrt(
             np.mean(
                 np.square(y)
@@ -240,13 +345,9 @@ def extract_features_from_audio(
         )
     )
 
-    # -----------------------------------------------------
-    # Silence Detection
-    #
-    # Keep librosa.effects.split because it uses an
-    # energy-based silence calculation and is separate
-    # from the problematic ZCR function.
-    # -----------------------------------------------------
+    # =====================================================
+    # 2. Silence Detection
+    # =====================================================
 
     try:
 
@@ -275,14 +376,13 @@ def extract_features_from_audio(
             e
         )
 
-        # Simple RMS-based fallback
-        threshold = (
-            max(
+        threshold = max(
+            float(
                 np.max(
                     np.abs(y)
-                ) * 0.02,
-                1e-5
-            )
+                )
+            ) * 0.02,
+            1e-5
         )
 
         non_silent_samples = int(
@@ -306,7 +406,7 @@ def extract_features_from_audio(
     )
 
     # =====================================================
-    # 2. MFCC Features
+    # 3. MFCC Features
     # =====================================================
 
     try:
@@ -314,7 +414,9 @@ def extract_features_from_audio(
         mfcc = librosa.feature.mfcc(
             y=y,
             sr=sr,
-            n_mfcc=20
+            n_mfcc=20,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )
 
         mfcc_mean = np.mean(
@@ -331,7 +433,8 @@ def extract_features_from_audio(
 
         logger.error(
             "MFCC extraction failed: %s",
-            e
+            e,
+            exc_info=True
         )
 
         raise RuntimeError(
@@ -339,19 +442,18 @@ def extract_features_from_audio(
         ) from e
 
     # =====================================================
-    # 3. MFCC Temporal Dynamics
+    # 4. MFCC Temporal Dynamics
     # =====================================================
 
     try:
 
-        # librosa.delta requires enough frames.
         if mfcc.shape[1] >= 3:
 
             mfcc_delta = librosa.feature.delta(
                 mfcc
             )
 
-            delta_std = float(
+            delta_std = _safe_float(
                 np.mean(
                     np.std(
                         mfcc_delta,
@@ -374,7 +476,7 @@ def extract_features_from_audio(
         delta_std = 0.0
 
     # =====================================================
-    # 4. Mel Spectrogram
+    # 5. Mel Spectrogram
     # =====================================================
 
     try:
@@ -382,7 +484,9 @@ def extract_features_from_audio(
         mel_spec = librosa.feature.melspectrogram(
             y=y,
             sr=sr,
-            n_mels=64
+            n_mels=64,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )
 
         mel_spec_db = librosa.power_to_db(
@@ -390,13 +494,13 @@ def extract_features_from_audio(
             ref=np.max
         )
 
-        mel_mean = float(
+        mel_mean = _safe_float(
             np.mean(
                 mel_spec_db
             )
         )
 
-        mel_std = float(
+        mel_std = _safe_float(
             np.std(
                 mel_spec_db
             )
@@ -406,7 +510,8 @@ def extract_features_from_audio(
 
         logger.error(
             "Mel spectrogram extraction failed: %s",
-            e
+            e,
+            exc_info=True
         )
 
         raise RuntimeError(
@@ -414,23 +519,25 @@ def extract_features_from_audio(
         ) from e
 
     # =====================================================
-    # 5. Spectral Centroid
+    # 6. Spectral Centroid
     # =====================================================
 
     try:
 
         spec_cent = librosa.feature.spectral_centroid(
             y=y,
-            sr=sr
+            sr=sr,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )[0]
 
-        cent_mean = float(
+        cent_mean = _safe_float(
             np.mean(
                 spec_cent
             )
         )
 
-        cent_std = float(
+        cent_std = _safe_float(
             np.std(
                 spec_cent
             )
@@ -447,23 +554,25 @@ def extract_features_from_audio(
         cent_std = 0.0
 
     # =====================================================
-    # 6. Spectral Bandwidth
+    # 7. Spectral Bandwidth
     # =====================================================
 
     try:
 
         spec_bw = librosa.feature.spectral_bandwidth(
             y=y,
-            sr=sr
+            sr=sr,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )[0]
 
-        bw_mean = float(
+        bw_mean = _safe_float(
             np.mean(
                 spec_bw
             )
         )
 
-        bw_std = float(
+        bw_std = _safe_float(
             np.std(
                 spec_bw
             )
@@ -480,7 +589,7 @@ def extract_features_from_audio(
         bw_std = 0.0
 
     # =====================================================
-    # 7. Spectral Rolloff
+    # 8. Spectral Rolloff
     # =====================================================
 
     try:
@@ -488,16 +597,18 @@ def extract_features_from_audio(
         spec_roll = librosa.feature.spectral_rolloff(
             y=y,
             sr=sr,
-            roll_percent=0.85
+            roll_percent=0.85,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )[0]
 
-        roll_mean = float(
+        roll_mean = _safe_float(
             np.mean(
                 spec_roll
             )
         )
 
-        roll_std = float(
+        roll_std = _safe_float(
             np.std(
                 spec_roll
             )
@@ -514,13 +625,15 @@ def extract_features_from_audio(
         roll_std = 0.0
 
     # =====================================================
-    # 8. Spectral Flux
+    # 9. Spectral Flux
     # =====================================================
 
     try:
 
         stft_complex = librosa.stft(
-            y
+            y,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )
 
         stft = np.abs(
@@ -534,7 +647,7 @@ def extract_features_from_audio(
                 axis=1
             )
 
-            spectral_flux = float(
+            spectral_flux = _safe_float(
                 np.mean(
                     np.sqrt(
                         np.sum(
@@ -559,21 +672,16 @@ def extract_features_from_audio(
         spectral_flux = 0.0
 
     # =====================================================
-    # 9. Zero Crossing Rate
+    # 10. Zero Crossing Rate
     # =====================================================
     #
     # IMPORTANT:
     #
-    # We intentionally DO NOT use:
+    # Do NOT use:
     #
     # librosa.feature.zero_crossing_rate()
     #
-    # because Render produced:
-    #
-    # no compiled object yet for
-    # <Library '_zc_wrapper' ...>
-    #
-    # Instead we use our NumPy implementation above.
+    # We use our pure NumPy implementation instead.
     #
     # =====================================================
 
@@ -581,17 +689,17 @@ def extract_features_from_audio(
 
         zcr = _calculate_zero_crossing_rate(
             y,
-            frame_length=2048,
-            hop_length=512
+            frame_length=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )
 
-        zcr_mean = float(
+        zcr_mean = _safe_float(
             np.mean(
                 zcr
             )
         )
 
-        zcr_std = float(
+        zcr_std = _safe_float(
             np.std(
                 zcr
             )
@@ -608,7 +716,7 @@ def extract_features_from_audio(
         zcr_std = 0.0
 
     # =====================================================
-    # 10. Chroma Features
+    # 11. Chroma Features
     # =====================================================
 
     try:
@@ -617,7 +725,9 @@ def extract_features_from_audio(
             y=y,
             sr=sr,
             tuning=0.0,
-            n_chroma=12
+            n_chroma=12,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )
 
         chroma_mean = np.mean(
@@ -648,7 +758,7 @@ def extract_features_from_audio(
         )
 
     # =====================================================
-    # 11. Pitch / Fundamental Frequency
+    # 12. Pitch / Fundamental Frequency
     # =====================================================
 
     try:
@@ -657,7 +767,9 @@ def extract_features_from_audio(
             y=y,
             sr=sr,
             fmin=50,
-            fmax=500
+            fmax=500,
+            n_fft=FRAME_LENGTH,
+            hop_length=HOP_LENGTH
         )
 
         pitch_values = []
@@ -680,27 +792,26 @@ def extract_features_from_audio(
                 )
             )
 
-            pitch = float(
+            pitch = _safe_float(
                 pitches[
                     index,
                     t
                 ]
             )
 
-            magnitude = float(
+            magnitude = _safe_float(
                 magnitudes[
                     index,
                     t
                 ]
             )
 
-            # Accept only meaningful pitch estimates
             if (
-                pitch >= 50
+                pitch >= 50.0
                 and
-                pitch <= 500
+                pitch <= 500.0
                 and
-                magnitude > 0
+                magnitude > 0.0
             ):
 
                 pitch_values.append(
@@ -718,24 +829,27 @@ def extract_features_from_audio(
                 dtype=np.float32
             )
 
-            f0_mean = float(
+            f0_mean = _safe_float(
                 np.mean(
                     pitch_values
-                )
+                ),
+                default=140.0
             )
 
-            f0_std = float(
+            f0_std = _safe_float(
                 np.std(
                     pitch_values
-                )
+                ),
+                default=12.0
             )
 
-            f0_var = float(
+            f0_var = _safe_float(
                 f0_std /
                 (
                     f0_mean +
                     1e-6
-                )
+                ),
+                default=0.08
             )
 
         else:
@@ -756,7 +870,7 @@ def extract_features_from_audio(
         f0_var = 0.08
 
     # =====================================================
-    # 12. Clean Numerical Values
+    # 13. Clean Numerical Values
     # =====================================================
 
     mfcc_mean = np.nan_to_num(
@@ -764,6 +878,8 @@ def extract_features_from_audio(
         nan=0.0,
         posinf=0.0,
         neginf=0.0
+    ).astype(
+        np.float32
     )
 
     mfcc_std = np.nan_to_num(
@@ -771,6 +887,8 @@ def extract_features_from_audio(
         nan=0.0,
         posinf=0.0,
         neginf=0.0
+    ).astype(
+        np.float32
     )
 
     chroma_mean = np.nan_to_num(
@@ -778,6 +896,8 @@ def extract_features_from_audio(
         nan=0.0,
         posinf=0.0,
         neginf=0.0
+    ).astype(
+        np.float32
     )
 
     chroma_std = np.nan_to_num(
@@ -785,15 +905,17 @@ def extract_features_from_audio(
         nan=0.0,
         posinf=0.0,
         neginf=0.0
+    ).astype(
+        np.float32
     )
 
     # =====================================================
-    # 13. ML Feature Vector
+    # 14. ML Feature Vector
     # =====================================================
     #
     # IMPORTANT:
     #
-    # The order is preserved from your existing pipeline.
+    # The order MUST NOT be changed.
     #
     # Total = 79 features.
     #
@@ -801,53 +923,57 @@ def extract_features_from_audio(
 
     feature_vector = np.hstack([
 
-        # MFCC
+        # 1-20
         mfcc_mean,
+
+        # 21-40
         mfcc_std,
 
-        # Mel
+        # 41-42
         mel_mean,
         mel_std,
 
-        # Spectral centroid
+        # 43-44
         cent_mean,
         cent_std,
 
-        # Spectral bandwidth
+        # 45-46
         bw_mean,
         bw_std,
 
-        # Spectral rolloff
+        # 47-48
         roll_mean,
         roll_std,
 
-        # Zero crossing rate
+        # 49-50
         zcr_mean,
         zcr_std,
 
-        # Chroma
+        # 51-62
         chroma_mean,
+
+        # 63-74
         chroma_std,
 
-        # Pitch
+        # 75-77
         f0_mean,
         f0_std,
         f0_var,
 
-        # MFCC dynamics
+        # 78
         delta_std,
 
-        # Spectral flux
+        # 79
         spectral_flux
     ])
 
-    # Ensure float32
+    # Convert to float32
     feature_vector = np.asarray(
         feature_vector,
         dtype=np.float32
     )
 
-    # Ensure no NaN / infinity
+    # Remove NaN / infinity
     feature_vector = np.nan_to_num(
         feature_vector,
         nan=0.0,
@@ -856,7 +982,7 @@ def extract_features_from_audio(
     )
 
     # =====================================================
-    # 14. Feature Count Validation
+    # 15. Feature Count Validation
     # =====================================================
 
     expected_feature_count = 79
@@ -871,16 +997,16 @@ def extract_features_from_audio(
         )
 
     # =====================================================
-    # 15. Human-readable Feature Summary
+    # 16. Human-readable Feature Summary
     # =====================================================
 
     feature_summary = {
 
-        "mfcc_mean_1": float(
+        "mfcc_mean_1": _safe_float(
             mfcc_mean[0]
         ),
 
-        "mfcc_variance": float(
+        "mfcc_variance": _safe_float(
             np.mean(
                 mfcc_std
             )
@@ -922,7 +1048,7 @@ def extract_features_from_audio(
         ),
 
         "chroma_energy": round(
-            float(
+            _safe_float(
                 np.mean(
                     chroma_mean
                 )
@@ -957,7 +1083,7 @@ def extract_features_from_audio(
     }
 
     # =====================================================
-    # 16. Signal Metrics
+    # 17. Signal Metrics
     # =====================================================
 
     signal_metrics = {
@@ -978,11 +1104,15 @@ def extract_features_from_audio(
         "silence_ratio": round(
             silence_ratio,
             3
+        ),
+
+        "feature_count": int(
+            len(feature_vector)
         )
     }
 
     # =====================================================
-    # 17. Final Result
+    # 18. Final Result
     # =====================================================
 
     return {
@@ -999,37 +1129,29 @@ def extract_features_from_audio(
 # Extract Features Directly From File
 # =========================================================
 
-# =========================================================
-# Extract Features Directly From File
-# =========================================================
-
 def extract_from_file(
     file_path,
-    target_sr=22050
+    target_sr=TARGET_SAMPLE_RATE
 ):
     """
-    Load an audio file and extract its
-    acoustic feature dictionary.
+    Load an audio file and extract its acoustic features.
 
     IMPORTANT:
-        This function intentionally does NOT use
-        librosa.load().
+        This function intentionally does NOT use:
 
-    librosa.load() was triggering a Numba compilation
-    error inside librosa.core.audio on the deployment
-    environment.
+            librosa.load()
 
-    Instead:
+        Instead:
 
-        SoundFile
-            ↓
-        NumPy
-            ↓
-        SciPy resample_poly
-            ↓
-        22050 Hz mono audio
-            ↓
-        feature extraction
+            SoundFile
+                ↓
+            NumPy
+                ↓
+            SciPy resample_poly
+                ↓
+            22050 Hz mono audio
+                ↓
+            Feature extraction
 
     Parameters:
         file_path:
@@ -1050,27 +1172,22 @@ def extract_from_file(
         # =================================================
 
         if not file_path:
+
             raise ValueError(
                 "Audio file path is empty."
             )
 
         if not os.path.exists(file_path):
+
             raise FileNotFoundError(
                 f"Audio file not found: {file_path}"
             )
 
         # =================================================
-        # 2. Load audio using SoundFile
+        # 2. Load audio with SoundFile
         # =================================================
         #
-        # IMPORTANT:
-        #
-        # Do NOT use:
-        #
-        #     librosa.load()
-        #
-        # because it triggers the Numba/librosa
-        # compilation problem seen in the project.
+        # We intentionally avoid librosa.load().
         #
         # =================================================
 
@@ -1085,6 +1202,7 @@ def extract_from_file(
         # =================================================
 
         if y is None:
+
             raise ValueError(
                 "SoundFile returned no audio data."
             )
@@ -1095,13 +1213,16 @@ def extract_from_file(
         )
 
         if y.size == 0:
+
             raise ValueError(
                 "Audio file contains no samples."
             )
 
         if original_sr is None or original_sr <= 0:
+
             raise ValueError(
-                f"Invalid source sample rate: {original_sr}"
+                f"Invalid source sample rate: "
+                f"{original_sr}"
             )
 
         # =================================================
@@ -1110,11 +1231,9 @@ def extract_from_file(
 
         if y.ndim == 2:
 
-            # SoundFile normally returns:
+            # SoundFile usually returns:
             #
-            #     samples × channels
-            #
-            # Average all channels.
+            # samples × channels
 
             y = np.mean(
                 y,
@@ -1131,18 +1250,15 @@ def extract_from_file(
             )
 
         # =================================================
-        # 5. Clean invalid numerical values
+        # 5. Clean numerical values
         # =================================================
 
-        y = np.nan_to_num(
-            y,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0
+        y = _normalize_audio(
+            y
         )
 
         # =================================================
-        # 6. Resample if necessary
+        # 6. Convert sample rate
         # =================================================
 
         original_sr = int(
@@ -1154,8 +1270,10 @@ def extract_from_file(
         )
 
         if target_sr <= 0:
+
             raise ValueError(
-                f"Invalid target sample rate: {target_sr}"
+                f"Invalid target sample rate: "
+                f"{target_sr}"
             )
 
         if original_sr != target_sr:
@@ -1170,15 +1288,20 @@ def extract_from_file(
             # Calculate rational resampling ratio
             # -------------------------------------------------
 
-            import math
-
             gcd = math.gcd(
                 original_sr,
                 target_sr
             )
 
-            up = target_sr // gcd
-            down = original_sr // gcd
+            up = (
+                target_sr //
+                gcd
+            )
+
+            down = (
+                original_sr //
+                gcd
+            )
 
             # -------------------------------------------------
             # Polyphase resampling
@@ -1199,15 +1322,14 @@ def extract_from_file(
             sr = original_sr
 
         # =================================================
-        # 7. Final audio validation
+        # 7. Final validation
         # =================================================
 
         if len(y) == 0:
+
             raise ValueError(
                 "Audio became empty after resampling."
             )
-
-        # Ensure one-dimensional signal
 
         y = np.asarray(
             y,
@@ -1216,33 +1338,31 @@ def extract_from_file(
             -1
         )
 
-        # Remove invalid values again after resampling
-
-        y = np.nan_to_num(
-            y,
-            nan=0.0,
-            posinf=0.0,
-            neginf=0.0
+        y = _normalize_audio(
+            y
         )
 
         # =================================================
-        # 8. Normalize extremely large values
+        # 8. Limit audio duration
         # =================================================
 
-        max_amplitude = float(
-            np.max(
-                np.abs(y)
-            )
+        max_samples = int(
+            MAX_AUDIO_DURATION_SECONDS *
+            sr
         )
 
-        if max_amplitude > 1.0:
+        if len(y) > max_samples:
 
-            y = (
-                y /
-                max_amplitude
-            ).astype(
-                np.float32
+            logger.warning(
+                "Input audio is %.2f seconds. "
+                "Limiting analysis to %.2f seconds.",
+                len(y) / float(sr),
+                MAX_AUDIO_DURATION_SECONDS
             )
+
+            y = y[
+                :max_samples
+            ]
 
         # =================================================
         # 9. Log successful loading
@@ -1265,15 +1385,27 @@ def extract_from_file(
         # 10. Extract acoustic features
         # =================================================
 
-        return extract_features_from_audio(
+        result = extract_features_from_audio(
             y,
             sr
         )
 
+        logger.info(
+            "Feature extraction completed successfully: "
+            "%d features",
+            len(
+                result[
+                    "feature_vector"
+                ]
+            )
+        )
+
+        return result
+
     except Exception as e:
 
         logger.error(
-            "Could not load audio file %s: %s",
+            "Could not process audio file %s: %s",
             file_path,
             e,
             exc_info=True
