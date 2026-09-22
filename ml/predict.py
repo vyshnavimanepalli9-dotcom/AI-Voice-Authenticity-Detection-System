@@ -3,28 +3,105 @@ import sys
 import joblib
 import numpy as np
 import logging
+from pathlib import Path
 
-# Ensure project root is in sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# ---------------------------------------------------------------------------
+# Robust project/model paths
+# ---------------------------------------------------------------------------
+# This file is:
+#     backend/ml/predict.py
+#
+# Therefore:
+#     PROJECT_DIR = repository root
+#     BACKEND_DIR  = repository/backend
+#     MODEL_DIR    = repository/backend/models
+#
+# We use absolute paths based on __file__ so the application does not depend
+# on Render's current working directory.
+# ---------------------------------------------------------------------------
+CURRENT_FILE = Path(__file__).resolve()
+ML_DIR = CURRENT_FILE.parent
+BACKEND_DIR = ML_DIR.parent
+PROJECT_DIR = BACKEND_DIR.parent
+
+# Support both the intended location (backend/models) and a root-level
+# models directory. The first existing complete pair is used.
+MODEL_LOCATIONS = [
+    BACKEND_DIR / "models",
+    PROJECT_DIR / "models",
+]
+
+# Ensure backend is available for imports.
+sys.path.insert(0, str(BACKEND_DIR))
 
 from ml.feature_extraction import extract_features_from_audio, extract_from_file
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "voice_authenticity_rf.joblib")
-SCALER_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "scaler.joblib")
+
+def _find_model_files():
+    """Find a complete model + scaler pair in supported project locations."""
+    checked = []
+
+    for model_dir in MODEL_LOCATIONS:
+        model_path = model_dir / "voice_authenticity_rf.joblib"
+        scaler_path = model_dir / "scaler.joblib"
+        checked.append(str(model_dir))
+
+        if model_path.is_file() and scaler_path.is_file():
+            return model_path, scaler_path
+
+    logger.warning(
+        "Trained model files were not found. Checked: %s",
+        ", ".join(checked)
+    )
+    return None, None
+
 
 def load_trained_model():
-    """Loads saved model and scaler if available."""
-    if os.path.exists(MODEL_PATH) and os.path.exists(SCALER_PATH):
-        try:
-            model = joblib.load(MODEL_PATH)
-            scaler = joblib.load(SCALER_PATH)
-            return model, scaler, True
-        except Exception as e:
-            logger.error(f"Failed to load trained model: {e}")
-            return None, None, False
-    return None, None, False
+    """
+    Load the trained Random Forest model and scaler.
+
+    The loader:
+      1. Uses paths relative to this Python file.
+      2. Checks backend/models first.
+      3. Falls back to repository/models.
+      4. Validates that both files exist.
+      5. Logs the exact location being loaded.
+    """
+    model_path, scaler_path = _find_model_files()
+
+    if model_path is None or scaler_path is None:
+        return None, None, False
+
+    try:
+        logger.info("Loading trained model: %s", model_path)
+        logger.info("Loading scaler: %s", scaler_path)
+
+        model = joblib.load(model_path)
+        scaler = joblib.load(scaler_path)
+
+        # Basic validation so a corrupt/wrong file doesn't silently become
+        # "Demo Mode".
+        if not hasattr(model, "predict_proba"):
+            raise TypeError("Loaded model does not provide predict_proba().")
+
+        if not hasattr(scaler, "transform"):
+            raise TypeError("Loaded scaler does not provide transform().")
+
+        logger.info(
+            "Trained model loaded successfully: %s",
+            type(model).__name__
+        )
+
+        return model, scaler, True
+
+    except Exception:
+        logger.exception(
+            "Failed to load trained model from %s",
+            model_path
+        )
+        return None, None, False
 
 def calculate_ai_acoustic_risk(summary):
     """
@@ -111,7 +188,7 @@ def predict_voice_authenticity(y, sr):
             demo_mode = False
             status_note = "Ensemble evaluation combining trained Random Forest classifier with acoustic spectral feature analysis."
         except Exception as e:
-            logger.warning(f"Error during ML inference, defaulting to acoustic evaluation: {e}")
+            logger.exception("Error during ML inference; falling back to acoustic evaluation.")
             final_ai_score = acoustic_ai_risk
             model_type = "Acoustic Signal Evaluator (Demo Mode)"
             demo_mode = True

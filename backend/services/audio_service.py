@@ -40,20 +40,26 @@ def process_and_analyze_audio(file_path):
     processing_time_ms = round((time.time() - start_time) * 1000, 2)
 
     # Package Final Payload
-    response_payload = {
-        "success": True,
-        "prediction": prediction_result["prediction"],
-        "is_human": prediction_result["is_human"],
-        "confidence": prediction_result["confidence"],
-        "demo_mode": prediction_result["demo_mode"],
-        "model_used": prediction_result["model_used"],
-        "status_note": prediction_result["status_note"],
-        "audio_metrics": prediction_result["metrics"],
-        "feature_summary": prediction_result["feature_summary"],
-        "xai_explanation": prediction_result["xai_explanation"],
-        "waveform_data": waveform_points,
-        "processing_time_ms": processing_time_ms
-    }
+    rresponse_payload = {
+    "success": True,
+    "prediction": prediction_result["prediction"],
+    "is_human": prediction_result["is_human"],
+    "confidence": prediction_result["confidence"],
+    "demo_mode": prediction_result["demo_mode"],
+    "model_used": prediction_result["model_used"],
+    "status_note": prediction_result["status_note"],
+    "audio_metrics": prediction_result["metrics"],
+    "feature_summary": prediction_result["feature_summary"],
+    "xai_explanation": prediction_result["xai_explanation"],
+    "waveform_data": waveform_points,
+    "processing_time_ms": processing_time_ms,
+
+    # Database-friendly metadata
+    "duration": round(float(len(y) / sr), 3),
+    "sampling_rate": sr
+    
+     "processing_time_ms": processing_time_ms
+}
 
     return response_payload
 

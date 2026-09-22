@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from flask import Flask, send_from_directory, jsonify
 from flask_cors import CORS
 from backend.routes.api import api_bp
+from backend.database import init_database
 
 # Set absolute path to frontend directory
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -20,6 +21,7 @@ CORS(app) # Enable Cross-Origin Resource Sharing
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 # 16 MB max payload limit
+init_database() # Initialize the database and create tables if they don't exist
 
 # Register API routes blueprint
 app.register_blueprint(api_bp, url_prefix='/api')
