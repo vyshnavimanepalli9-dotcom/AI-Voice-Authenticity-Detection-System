@@ -1,8 +1,9 @@
 import time
 import logging
 
-import librosa
 import numpy as np
+import soundfile as sf
+from scipy.signal import resample_poly
 
 from ml.preprocessing import validate_audio_signal, normalize_signal
 from ml.predict import predict_voice_authenticity
@@ -10,41 +11,91 @@ from ml.predict import predict_voice_authenticity
 
 logger = logging.getLogger(__name__)
 
+TARGET_SAMPLE_RATE = 22050
+MAX_DURATION_SECONDS = 30
+
 
 def process_and_analyze_audio(file_path):
     """
     Loads an audio file, validates the signal, normalizes it,
     runs the voice authenticity classifier, and prepares
     waveform and audio metadata for the API response.
+
+    Uses SoundFile + SciPy instead of librosa.load()
+    to avoid Numba/LLVM compilation during deployment.
     """
 
     start_time = time.time()
-    target_sr = 22050
+    target_sr = TARGET_SAMPLE_RATE
 
     # ---------------------------------------------------------
     # 1. Load audio
     # ---------------------------------------------------------
     try:
-        y, sr = librosa.load(
+        y, sr = sf.read(
             file_path,
-            sr=target_sr,
-            mono=True
+            dtype="float32",
+            always_2d=False
         )
 
-        # Limit analysis duration for deployment stability
-        MAX_DURATION_SECONDS = 30
+        # Convert stereo/multi-channel audio to mono
+        if y.ndim == 2:
+            y = np.mean(
+                y,
+                axis=1
+            ).astype(np.float32)
 
+        # Ensure 1-D float32 signal
+        y = np.asarray(
+            y,
+            dtype=np.float32
+        ).flatten()
+
+        if len(y) == 0:
+            raise ValueError(
+                "The uploaded audio file contains no samples."
+            )
+
+        # -----------------------------------------------------
+        # Limit audio duration before expensive processing
+        # -----------------------------------------------------
         max_samples = int(
             MAX_DURATION_SECONDS * sr
         )
 
         if len(y) > max_samples:
+            logger.info(
+                "Audio exceeds %s seconds. Truncating.",
+                MAX_DURATION_SECONDS
+            )
+
             y = y[:max_samples]
 
+        # -----------------------------------------------------
+        # Resample to target sample rate
+        # -----------------------------------------------------
+        if sr != target_sr:
+
+            original_sr = sr
+
+            y = resample_poly(
+                y,
+                target_sr,
+                sr
+            ).astype(np.float32)
+
+            sr = target_sr
+
+            logger.info(
+                "Audio resampled from %s Hz to %s Hz.",
+                original_sr,
+                target_sr
+            )
+
     except Exception as e:
-        logger.error(
-            "Librosa audio loading error: %s",
-            e
+
+        logger.exception(
+            "Audio loading/decoding error"
         )
 
         raise ValueError(
@@ -57,6 +108,7 @@ def process_and_analyze_audio(file_path):
     # 2. Validate audio signal
     # ---------------------------------------------------------
     try:
+
         is_valid, warning_msg = validate_audio_signal(
             y,
             sr
@@ -69,9 +121,9 @@ def process_and_analyze_audio(file_path):
         raise
 
     except Exception as e:
-        logger.error(
-            "Audio validation error: %s",
-            e
+
+        logger.exception(
+            "Audio validation error"
         )
 
         raise ValueError(
@@ -82,12 +134,18 @@ def process_and_analyze_audio(file_path):
     # 3. Normalize audio
     # ---------------------------------------------------------
     try:
+
         y = normalize_signal(y)
 
+        y = np.asarray(
+            y,
+            dtype=np.float32
+        ).flatten()
+
     except Exception as e:
-        logger.error(
-            "Audio normalization error: %s",
-            e
+
+        logger.exception(
+            "Audio normalization error"
         )
 
         raise ValueError(
@@ -106,12 +164,14 @@ def process_and_analyze_audio(file_path):
     # 5. Run ML authenticity classifier
     # ---------------------------------------------------------
     try:
+
         prediction_result = predict_voice_authenticity(
             y,
             sr
         )
 
     except Exception as e:
+
         logger.exception(
             "Voice authenticity prediction failed"
         )
@@ -227,11 +287,13 @@ def generate_waveform_points(y, num_points=100):
         chunk = y[start:end]
 
         if len(chunk) > 0:
+
             value = float(
                 np.max(
                     np.abs(chunk)
                 )
             )
+
         else:
             value = 0.0
 
