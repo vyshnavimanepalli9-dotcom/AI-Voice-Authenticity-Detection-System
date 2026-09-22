@@ -31,6 +31,16 @@ def process_and_analyze_audio(file_path):
             mono=True
         )
 
+        # Limit analysis duration for deployment stability
+        MAX_DURATION_SECONDS = 30
+
+        max_samples = int(
+            MAX_DURATION_SECONDS * sr
+        )
+
+        if len(y) > max_samples:
+            y = y[:max_samples]
+
     except Exception as e:
         logger.error(
             "Librosa audio loading error: %s",
