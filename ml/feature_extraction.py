@@ -2,24 +2,6 @@ import os
 import logging
 import math
 
-# =========================================================
-# IMPORTANT: Disable Numba JIT BEFORE importing librosa
-# =========================================================
-#
-# Render was previously triggering Numba/LLVM compilation
-# during audio analysis, which caused:
-#
-#   WORKER TIMEOUT
-#   SIGKILL
-#   HTTP 500
-#
-# We do not use librosa's JIT-dependent ZCR implementation.
-#
-# =========================================================
-
-os.environ["NUMBA_DISABLE_JIT"] = "1"
-os.environ["NUMBA_NUM_THREADS"] = "1"
-
 import librosa
 import numpy as np
 import soundfile as sf
@@ -37,8 +19,6 @@ logger = logging.getLogger(__name__)
 TARGET_SAMPLE_RATE = 22050
 
 # Maximum audio duration processed by the feature extractor.
-# This prevents extremely long uploads from consuming too
-# much memory/time on Render.
 MAX_AUDIO_DURATION_SECONDS = 60.0
 
 # Standard feature extraction parameters
@@ -58,15 +38,11 @@ def _normalize_audio(y):
         numpy.ndarray
     """
 
-    y = np.asarray(
-        y,
-        dtype=np.float32
-    )
+    y = np.asarray(y, dtype=np.float32)
 
     if y.size == 0:
         return y
 
-    # Remove NaN / infinity
     y = np.nan_to_num(
         y,
         nan=0.0,
@@ -74,21 +50,14 @@ def _normalize_audio(y):
         neginf=0.0
     )
 
-    # Normalize only if necessary
     max_amplitude = float(
-        np.max(
-            np.abs(y)
-        )
+        np.max(np.abs(y))
     )
 
     if max_amplitude > 1.0:
-
         y = (
-            y /
-            max_amplitude
-        ).astype(
-            np.float32
-        )
+            y / max_amplitude
+        ).astype(np.float32)
 
     return y
 
@@ -105,13 +74,11 @@ def _calculate_zero_crossing_rate(
     """
     NumPy implementation of frame-based Zero Crossing Rate.
 
-    IMPORTANT:
-        We intentionally do NOT use:
+    We intentionally do not use:
+        librosa.feature.zero_crossing_rate()
 
-            librosa.feature.zero_crossing_rate()
-
-        because the deployment previously triggered
-        Numba/LLVM compilation problems.
+    This keeps ZCR independent from librosa's Numba-based
+    implementation.
 
     Returns:
         1D numpy array
@@ -123,18 +90,12 @@ def _calculate_zero_crossing_rate(
     )
 
     if len(y) == 0:
-
         return np.array(
             [0.0],
             dtype=np.float32
         )
 
-    # -----------------------------------------------------
-    # Pad short audio
-    # -----------------------------------------------------
-
     if len(y) < frame_length:
-
         y = np.pad(
             y,
             (
@@ -144,50 +105,30 @@ def _calculate_zero_crossing_rate(
             mode="constant"
         )
 
-    # -----------------------------------------------------
-    # Create frames
-    # -----------------------------------------------------
-
     frames = np.lib.stride_tricks.sliding_window_view(
         y,
         frame_length
     )
 
-    frames = frames[
-        ::hop_length
-    ]
+    frames = frames[::hop_length]
 
     if frames.size == 0:
-
         return np.array(
             [0.0],
             dtype=np.float32
         )
 
-    # -----------------------------------------------------
-    # Detect sign changes
-    # -----------------------------------------------------
-
-    signs = np.signbit(
-        frames
-    )
+    signs = np.signbit(frames)
 
     crossings = (
-        signs[:, :-1]
-        !=
+        signs[:, :-1] !=
         signs[:, 1:]
     )
-
-    # -----------------------------------------------------
-    # Calculate crossing ratio
-    # -----------------------------------------------------
 
     zcr = np.mean(
         crossings,
         axis=1
-    ).astype(
-        np.float32
-    )
+    ).astype(np.float32)
 
     return zcr
 
@@ -205,7 +146,6 @@ def _safe_float(
     """
 
     try:
-
         value = float(value)
 
         if not np.isfinite(value):
@@ -214,7 +154,6 @@ def _safe_float(
         return value
 
     except Exception:
-
         return float(default)
 
 
@@ -264,7 +203,6 @@ def extract_features_from_audio(
     # =====================================================
 
     if y is None:
-
         raise ValueError(
             "Audio signal is None."
         )
@@ -275,13 +213,11 @@ def extract_features_from_audio(
     )
 
     if len(y) == 0:
-
         raise ValueError(
             "Audio signal is empty."
         )
 
     if sr is None or sr <= 0:
-
         raise ValueError(
             "Invalid sample rate."
         )
@@ -292,12 +228,9 @@ def extract_features_from_audio(
     # Clean audio
     # =====================================================
 
-    y = _normalize_audio(
-        y
-    )
+    y = _normalize_audio(y)
 
     if len(y) == 0:
-
         raise ValueError(
             "Audio signal contains no usable samples."
         )
@@ -307,8 +240,7 @@ def extract_features_from_audio(
     # =====================================================
 
     max_samples = int(
-        MAX_AUDIO_DURATION_SECONDS *
-        sr
+        MAX_AUDIO_DURATION_SECONDS * sr
     )
 
     if len(y) > max_samples:
@@ -320,9 +252,7 @@ def extract_features_from_audio(
             MAX_AUDIO_DURATION_SECONDS
         )
 
-        y = y[
-            :max_samples
-        ]
+        y = y[:max_samples]
 
     # =====================================================
     # 1. Signal Metrics
@@ -332,10 +262,6 @@ def extract_features_from_audio(
         len(y) /
         float(sr)
     )
-
-    # -----------------------------------------------------
-    # RMS Energy
-    # -----------------------------------------------------
 
     rms = _safe_float(
         np.sqrt(
@@ -495,15 +421,11 @@ def extract_features_from_audio(
         )
 
         mel_mean = _safe_float(
-            np.mean(
-                mel_spec_db
-            )
+            np.mean(mel_spec_db)
         )
 
         mel_std = _safe_float(
-            np.std(
-                mel_spec_db
-            )
+            np.std(mel_spec_db)
         )
 
     except Exception as e:
@@ -532,15 +454,11 @@ def extract_features_from_audio(
         )[0]
 
         cent_mean = _safe_float(
-            np.mean(
-                spec_cent
-            )
+            np.mean(spec_cent)
         )
 
         cent_std = _safe_float(
-            np.std(
-                spec_cent
-            )
+            np.std(spec_cent)
         )
 
     except Exception as e:
@@ -567,15 +485,11 @@ def extract_features_from_audio(
         )[0]
 
         bw_mean = _safe_float(
-            np.mean(
-                spec_bw
-            )
+            np.mean(spec_bw)
         )
 
         bw_std = _safe_float(
-            np.std(
-                spec_bw
-            )
+            np.std(spec_bw)
         )
 
     except Exception as e:
@@ -603,15 +517,11 @@ def extract_features_from_audio(
         )[0]
 
         roll_mean = _safe_float(
-            np.mean(
-                spec_roll
-            )
+            np.mean(spec_roll)
         )
 
         roll_std = _safe_float(
-            np.std(
-                spec_roll
-            )
+            np.std(spec_roll)
         )
 
     except Exception as e:
@@ -674,16 +584,6 @@ def extract_features_from_audio(
     # =====================================================
     # 10. Zero Crossing Rate
     # =====================================================
-    #
-    # IMPORTANT:
-    #
-    # Do NOT use:
-    #
-    # librosa.feature.zero_crossing_rate()
-    #
-    # We use our pure NumPy implementation instead.
-    #
-    # =====================================================
 
     try:
 
@@ -694,15 +594,11 @@ def extract_features_from_audio(
         )
 
         zcr_mean = _safe_float(
-            np.mean(
-                zcr
-            )
+            np.mean(zcr)
         )
 
         zcr_std = _safe_float(
-            np.std(
-                zcr
-            )
+            np.std(zcr)
         )
 
     except Exception as e:
@@ -778,10 +674,7 @@ def extract_features_from_audio(
             pitches.shape[1]
         ):
 
-            magnitude_column = magnitudes[
-                :,
-                t
-            ]
+            magnitude_column = magnitudes[:, t]
 
             if len(magnitude_column) == 0:
                 continue
@@ -793,17 +686,11 @@ def extract_features_from_audio(
             )
 
             pitch = _safe_float(
-                pitches[
-                    index,
-                    t
-                ]
+                pitches[index, t]
             )
 
             magnitude = _safe_float(
-                magnitudes[
-                    index,
-                    t
-                ]
+                magnitudes[index, t]
             )
 
             if (
@@ -817,10 +704,6 @@ def extract_features_from_audio(
                 pitch_values.append(
                     pitch
                 )
-
-        # -------------------------------------------------
-        # Calculate pitch statistics
-        # -------------------------------------------------
 
         if len(pitch_values) > 0:
 
@@ -878,102 +761,70 @@ def extract_features_from_audio(
         nan=0.0,
         posinf=0.0,
         neginf=0.0
-    ).astype(
-        np.float32
-    )
+    ).astype(np.float32)
 
     mfcc_std = np.nan_to_num(
         mfcc_std,
         nan=0.0,
         posinf=0.0,
         neginf=0.0
-    ).astype(
-        np.float32
-    )
+    ).astype(np.float32)
 
     chroma_mean = np.nan_to_num(
         chroma_mean,
         nan=0.0,
         posinf=0.0,
         neginf=0.0
-    ).astype(
-        np.float32
-    )
+    ).astype(np.float32)
 
     chroma_std = np.nan_to_num(
         chroma_std,
         nan=0.0,
         posinf=0.0,
         neginf=0.0
-    ).astype(
-        np.float32
-    )
+    ).astype(np.float32)
 
     # =====================================================
     # 14. ML Feature Vector
     # =====================================================
-    #
-    # IMPORTANT:
-    #
-    # The order MUST NOT be changed.
-    #
-    # Total = 79 features.
-    #
-    # =====================================================
 
     feature_vector = np.hstack([
 
-        # 1-20
         mfcc_mean,
-
-        # 21-40
         mfcc_std,
 
-        # 41-42
         mel_mean,
         mel_std,
 
-        # 43-44
         cent_mean,
         cent_std,
 
-        # 45-46
         bw_mean,
         bw_std,
 
-        # 47-48
         roll_mean,
         roll_std,
 
-        # 49-50
         zcr_mean,
         zcr_std,
 
-        # 51-62
         chroma_mean,
-
-        # 63-74
         chroma_std,
 
-        # 75-77
         f0_mean,
         f0_std,
         f0_var,
 
-        # 78
         delta_std,
 
-        # 79
         spectral_flux
     ])
 
-    # Convert to float32
     feature_vector = np.asarray(
         feature_vector,
         dtype=np.float32
     )
 
-    # Remove NaN / infinity
     feature_vector = np.nan_to_num(
         feature_vector,
         nan=0.0,
@@ -1136,33 +987,17 @@ def extract_from_file(
     """
     Load an audio file and extract its acoustic features.
 
-    IMPORTANT:
-        This function intentionally does NOT use:
+    Uses:
 
-            librosa.load()
-
-        Instead:
-
-            SoundFile
-                ↓
-            NumPy
-                ↓
-            SciPy resample_poly
-                ↓
-            22050 Hz mono audio
-                ↓
-            Feature extraction
-
-    Parameters:
-        file_path:
-            Path to audio file.
-
-        target_sr:
-            Target sample rate.
-            Default = 22050 Hz.
-
-    Returns:
-        Feature extraction dictionary.
+        SoundFile
+            ↓
+        NumPy
+            ↓
+        SciPy resample_poly
+            ↓
+        22050 Hz mono audio
+            ↓
+        Feature extraction
     """
 
     try:
@@ -1185,10 +1020,6 @@ def extract_from_file(
 
         # =================================================
         # 2. Load audio with SoundFile
-        # =================================================
-        #
-        # We intentionally avoid librosa.load().
-        #
         # =================================================
 
         y, original_sr = sf.read(
@@ -1231,10 +1062,6 @@ def extract_from_file(
 
         if y.ndim == 2:
 
-            # SoundFile usually returns:
-            #
-            # samples × channels
-
             y = np.mean(
                 y,
                 axis=1
@@ -1253,9 +1080,7 @@ def extract_from_file(
         # 5. Clean numerical values
         # =================================================
 
-        y = _normalize_audio(
-            y
-        )
+        y = _normalize_audio(y)
 
         # =================================================
         # 6. Convert sample rate
@@ -1284,10 +1109,6 @@ def extract_from_file(
                 target_sr
             )
 
-            # -------------------------------------------------
-            # Calculate rational resampling ratio
-            # -------------------------------------------------
-
             gcd = math.gcd(
                 original_sr,
                 target_sr
@@ -1302,10 +1123,6 @@ def extract_from_file(
                 original_sr //
                 gcd
             )
-
-            # -------------------------------------------------
-            # Polyphase resampling
-            # -------------------------------------------------
 
             y = resample_poly(
                 y,
@@ -1334,21 +1151,16 @@ def extract_from_file(
         y = np.asarray(
             y,
             dtype=np.float32
-        ).reshape(
-            -1
-        )
+        ).reshape(-1)
 
-        y = _normalize_audio(
-            y
-        )
+        y = _normalize_audio(y)
 
         # =================================================
         # 8. Limit audio duration
         # =================================================
 
         max_samples = int(
-            MAX_AUDIO_DURATION_SECONDS *
-            sr
+            MAX_AUDIO_DURATION_SECONDS * sr
         )
 
         if len(y) > max_samples:
@@ -1360,9 +1172,7 @@ def extract_from_file(
                 MAX_AUDIO_DURATION_SECONDS
             )
 
-            y = y[
-                :max_samples
-            ]
+            y = y[:max_samples]
 
         # =================================================
         # 9. Log successful loading
